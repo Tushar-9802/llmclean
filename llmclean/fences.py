@@ -26,26 +26,33 @@ import re
 # Matches an opening fence line, e.g.  ```json  or  ```  or  ~~~python
 # Group 1: the fence characters (``` or ~~~)
 # Group 2: optional language identifier (may be empty)
+#
+# Note: the trailing `[ \t]*\r?$` (not just `[ \t]*$`) tolerates a Windows
+# CRLF — without `\r?` the `$` anchor in MULTILINE mode matches *just before*
+# `\n`, but the `\r` in `\r\n` is not matched by `[ \t]` and breaks the line
+# match silently. CRLF is common in LLM output captured from Windows clients.
 _OPEN_FENCE_RE = re.compile(
-    r"^[ \t]*(?P<fence>`{3,}|~{3,})[ \t]*(?P<lang>[a-zA-Z0-9_+\-.]*)[ \t]*$",
+    r"^[ \t]*(?P<fence>`{3,}|~{3,})[ \t]*(?P<lang>[a-zA-Z0-9_+\-.]*)[ \t]*\r?$",
     re.MULTILINE,
 )
 
-# Matches a closing fence: same or more fence characters on its own line
+# Matches a closing fence: same or more fence characters on its own line.
+# Same CRLF tolerance as the opener (see note above).
 _CLOSE_FENCE_RE = re.compile(
-    r"^[ \t]*(?P<fence>`{3,}|~{3,})[ \t]*$",
+    r"^[ \t]*(?P<fence>`{3,}|~{3,})[ \t]*\r?$",
     re.MULTILINE,
 )
 
 # After all fences are stripped, clean up lone language-tag lines that were
 # sitting right above the content, e.g. a line that is just "json" or "python"
-# This is intentionally narrow to avoid removing real content.
+# This is intentionally narrow to avoid removing real content. Same CRLF
+# tolerance — see note on _OPEN_FENCE_RE above.
 _LONE_LANG_TAG_RE = re.compile(
     r"^[ \t]*(?:json|python|javascript|js|typescript|ts|bash|sh|shell|"
     r"html|xml|css|yaml|yml|toml|ini|markdown|md|text|txt|plaintext|"
     r"sql|graphql|rust|go|java|c|cpp|c\+\+|csharp|cs|ruby|rb|php|"
     r"swift|kotlin|scala|r|lua|perl|haskell|elixir|erlang|clojure|"
-    r"dart|objc|output|console|log)[ \t]*$",
+    r"dart|objc|output|console|log)[ \t]*\r?$",
     re.MULTILINE | re.IGNORECASE,
 )
 
@@ -79,6 +86,10 @@ def strip_fences(text: str) -> str:
     original = text
 
     try:
+        # Strip leading BOM (U+FEFF) — same fix as enforce_json. Without
+        # this, a BOM right before the opening fence breaks the `^` anchor
+        # in _OPEN_FENCE_RE.
+        text = text.lstrip("﻿")
         result = _strip_all_fences(text)
         # Collapse any excessive blank lines introduced by fence removal
         result = _normalize_blank_lines(result)

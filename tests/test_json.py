@@ -203,3 +203,81 @@ def test_single_quoted_keys_and_values():
     assert _is_valid_json(result)
     data = json.loads(result)
     assert data["name"] == "Alice"
+
+
+# ---------------------------------------------------------------------------
+# BOM (U+FEFF) handling
+# ---------------------------------------------------------------------------
+# Some LLM client SDKs and any Windows file IO round-trip can prepend a UTF-8
+# Byte Order Mark to the response. json.loads sees U+FEFF as "Unexpected
+# character at position 0" and fails. Sakhi hit this in production logs;
+# llmclean now strips it up-front. The original input is not mutated — only
+# the working copy fed to the strategy pipeline.
+
+def test_bom_stripped_from_object():
+    text = "﻿" + '{"key": "value"}'
+    result = enforce_json(text)
+    assert _is_valid_json(result)
+    assert json.loads(result)["key"] == "value"
+
+
+def test_bom_stripped_from_fenced_json():
+    text = "﻿" + '```json\n{"a": 1}\n```'
+    result = enforce_json(text)
+    assert _is_valid_json(result)
+    assert json.loads(result)["a"] == 1
+
+
+def test_bom_only_input_returns_unchanged():
+    # Pure BOM, no JSON anywhere → fail gracefully, return original
+    text = "﻿"
+    result = enforce_json(text)
+    # Function never raises; original or empty is acceptable.
+    assert result in (text, "")
+
+
+# ---------------------------------------------------------------------------
+# Double-quote overrun collapse
+# ---------------------------------------------------------------------------
+# Models occasionally double the quotes around a value (e.g. from Python
+# triple-string leaks: '"""{"foo": "bar"}"""'). The collapse pattern
+# requires non-empty content between the doubled quotes, so legitimate
+# empty strings ("") are never matched.
+
+def test_double_quote_collapse_around_value():
+    text = '{"key": ""value""}'
+    result = enforce_json(text)
+    assert _is_valid_json(result)
+    assert json.loads(result)["key"] == "value"
+
+
+def test_double_quote_collapse_around_key():
+    text = '{""key"": "value"}'
+    result = enforce_json(text)
+    assert _is_valid_json(result)
+    assert json.loads(result)["key"] == "value"
+
+
+def test_double_quote_triple_overrun():
+    # Triple quotes on both sides
+    text = '{"""key""": """value"""}'
+    result = enforce_json(text)
+    assert _is_valid_json(result)
+    assert json.loads(result)["key"] == "value"
+
+
+def test_double_quote_legitimate_empty_string_preserved():
+    """Critical: an empty-string value ("") must NOT be collapsed. The
+    overrun regex requires content between the doubled quotes, so this is
+    safe by construction. This test locks the safety in place."""
+    text = '{"key": ""}'
+    result = enforce_json(text)
+    assert _is_valid_json(result)
+    assert json.loads(result)["key"] == ""
+
+
+def test_double_quote_legitimate_empty_string_in_array():
+    text = '["a", "", "b"]'
+    result = enforce_json(text)
+    assert _is_valid_json(result)
+    assert json.loads(result) == ["a", "", "b"]

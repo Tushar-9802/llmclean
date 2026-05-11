@@ -23,6 +23,13 @@ import json
 import re
 from .fences import strip_fences
 
+
+# Byte Order Mark — U+FEFF. Some LLM client SDKs and any pipeline that
+# round-trips through Windows file IO prepend a BOM. json.loads sees it as
+# "Unexpected character at position 0" and bails. We strip it up-front.
+_BOM = "﻿"
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -53,7 +60,7 @@ def enforce_json(text: str) -> str:
     original = text
 
     try:
-        return _run_pipeline(text.strip())
+        return _run_pipeline(text.lstrip(_BOM).strip())
     except Exception:
         return original
 
@@ -67,6 +74,7 @@ def _run_pipeline(text: str) -> str:
         _try_parse_direct,
         _try_strip_fences,
         _try_extract_json_substring,
+        _try_collapse_double_quotes,
         _try_fix_trailing_commas,
         _try_fix_python_literals,
         _try_fix_unquoted_keys,
@@ -139,6 +147,23 @@ def _extract_by_brackets(text: str, open_char: str, close_char: str):
     return None
 
 
+def _try_collapse_double_quotes(text: str):
+    '''Strategy: collapse doubled-quote wrappers around content to single quotes.
+
+    Models occasionally emit doubled-quote overruns like ``{"key": ""value""}``
+    or higher-order forms from Python f-string / triple-string leaks. We ONLY
+    collapse the form ""<content>"" where there is non-empty content between
+    the doubled quotes. Sakhi's `_parse_json_response` also collapses the
+    asymmetric forms ``: ""x`` and ``x"",`` but those patterns can corrupt
+    legitimate empty-string values (``{"k": ""}``, ``["", "x"]``) because
+    there is no way to tell from the regex alone whether the "" is overrun
+    or empty. The content-required form here is unambiguous and safe.'''
+    cleaned = _collapse_double_quote_wrappers(text)
+    if cleaned == text:
+        return None
+    return _parse_and_serialize(cleaned)
+
+
 def _try_fix_trailing_commas(text: str):
     """Strategy 4: remove trailing commas before closing brackets."""
     cleaned = _remove_trailing_commas(text)
@@ -204,6 +229,16 @@ def _remove_trailing_commas(text: str) -> str:
     return _TRAILING_COMMA_RE.sub(r"\1", text)
 
 
+# Double-quote-wrapper collapse: ""text"" → "text"
+# Requires non-empty content between the doubled quotes so legitimate empty
+# strings ("") are never matched. See _try_collapse_double_quotes docstring
+# for why we don't include the asymmetric Sakhi patterns.
+_DOUBLE_QUOTE_WRAPPER_RE = re.compile(r'"{2,}([^"]+)"{2,}')
+
+def _collapse_double_quote_wrappers(text: str) -> str:
+    return _DOUBLE_QUOTE_WRAPPER_RE.sub(r'"\1"', text)
+
+
 # Bare (unquoted) object keys:  { key: ... }  →  { "key": ... }
 # Only matches word-characters; won't disturb already-quoted keys.
 _UNQUOTED_KEY_RE = re.compile(r'(?<!["\w])(\b[a-zA-Z_][a-zA-Z0-9_]*\b)\s*(?=:)')
@@ -250,43 +285,8 @@ def _close_open_structures(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Utility
+# Helpers used by the fixers above
 # ---------------------------------------------------------------------------
-
-def _parse_and_serialize(text: str):
-    """Try to parse *text* as JSON; return re-serialized string or None."""
-    try:
-        parsed = json.loads(text.strip())
-        return json.dumps(parsed, ensure_ascii=False, indent=2)
-    except (json.JSONDecodeError, ValueError):
-        return None
-
-
-# ---------------------------------------------------------------------------
-# Python-literal fixer (added separately for clarity)
-# ---------------------------------------------------------------------------
-
-# Word-boundary replacements for Python boolean/None literals
-_PYTHON_LITERAL_RE = re.compile(r'\bTrue\b|\bFalse\b|\bNone\b')
-_PYTHON_LITERAL_MAP = {"True": "true", "False": "false", "None": "null"}
-
-def _replace_python_literals(text: str) -> str:
-    """Replace Python True/False/None with JSON true/false/null.
-
-    Also converts single-quoted strings to double-quoted where safe.
-    Only operates outside of already-valid JSON strings to avoid
-    corrupting content that legitimately contains these words.
-    """
-    # Step 1: True / False / None  (simple word-boundary swap)
-    result = _PYTHON_LITERAL_RE.sub(lambda m: _PYTHON_LITERAL_MAP[m.group()], text)
-
-    # Step 2: single-quoted strings -> double-quoted
-    # Strategy: only replace 'value' patterns that look like JSON string values
-    # or keys (preceded by { , or : and optional whitespace).
-    # This is intentionally conservative to avoid mangling prose.
-    result = _single_to_double_quotes(result)
-    return result
-
 
 def _single_to_double_quotes(text: str) -> str:
     """Convert single-quoted JSON-ish strings to double-quoted JSON."""

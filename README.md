@@ -1,10 +1,8 @@
 # llmclean
 
-**A zero-dependency Python library for cleaning and normalizing raw LLM output.**
+Small Python library for cleaning the noise out of raw LLM output. Strips markdown fences, repairs malformed JSON, trims runaway repetitions. Zero runtime dependencies — pure standard library.
 
-LLMs are inconsistent: they wrap JSON in markdown fences, add prose around code, repeat themselves, and produce subtly broken JSON. `llmclean` handles all of that with three focused utilities.
-
----
+I built this because my other projects ([Sakhi](https://github.com/Tushar-9802/Sakhi), [Resume-parser](https://github.com/Tushar-9802/Resume-parser)) kept reinventing the same five or six regex passes against the same recurring failure modes. The [0.2.0 changelog](CHANGELOG.md) documents what production traffic on those projects taught me to fix here.
 
 ## Install
 
@@ -12,67 +10,61 @@ LLMs are inconsistent: they wrap JSON in markdown fences, add prose around code,
 pip install llmclean
 ```
 
----
-
-## Quick start
+## What it does
 
 ```python
 from llmclean import strip_fences, enforce_json, trim_repetition
 
-# Remove ```json ... ``` wrappers
+# ```lang ... ``` wrappers, including tilde fences and CRLF line endings
 strip_fences('```json\n{"name": "Alice"}\n```')
 # → '{"name": "Alice"}'
 
-# Extract valid JSON from messy output
+# JSON buried in prose, with trailing comma + Python literals
 enforce_json('Here you go: {"ok": True, "items": [1,2,3,]}')
 # → '{\n  "ok": true,\n  "items": [1, 2, 3]\n}'
 
-# Remove repeated sentences/paragraphs at the end
+# Model looped on the same sentence
 trim_repetition("The answer is 42. This is final. This is final.")
 # → 'The answer is 42. This is final.'
 ```
 
-For full examples and edge cases see **[USAGE.md](USAGE.md)**.
+`enforce_json` runs a pipeline of strategies in order and stops at the first one that produces parseable JSON. Strategies cover: existing valid JSON, fences, prose around the JSON, BOM at position 0, doubled-quote overruns like `""value""`, trailing commas, Python `True`/`False`/`None`, single-quoted strings, unquoted keys, and unclosed brackets. Full set in [USAGE.md](USAGE.md).
 
----
+## What it doesn't do (and the thing to use instead)
 
-## Functions
+- Validate JSON against a schema — use `jsonschema` or `pydantic`
+- Re-prompt the model to fix its output — use `instructor`
+- Constrain the model at generation time so it can't produce broken output — use `outlines`
 
-| Function | What it fixes |
-|---|---|
-| `strip_fences(text)` | Removes ` ```lang ` / ` ``` ` / `~~~` code fences |
-| `enforce_json(text)` | Extracts valid JSON from fences, prose, trailing commas, Python literals, unquoted keys, unclosed brackets |
-| `trim_repetition(text)` | Removes repeated sentences, near-duplicates, and repeated paragraphs from the tail |
+These are different problems with different tools. llmclean handles the post-hoc cleanup pass; compose it with the above if you need more.
 
----
+## Design choices
 
-## Design principles
+Three constraints kept while iterating:
 
-- **Zero dependencies** — pure Python standard library
-- **Never throws** — every function returns the original input if cleaning fails
-- **Non-destructive** — unchanged input when nothing needs cleaning
-- **Composable** — chain freely
+The library should never raise. Every public function returns the original input on failure, so it composes safely in pipelines that can't afford an exception path.
 
-```python
-# Full pipeline
-data = enforce_json(trim_repetition(strip_fences(raw_output)))
-```
+Stay zero-dep. The standard library is sufficient for what this needs to do, and pulling in a dependency would force every downstream user to deal with version conflicts they didn't sign up for.
 
----
+Be predictable. Same input always produces the same output. No external state, no model calls, no fuzzy heuristics that change behaviour silently across versions.
 
-## Running tests
+## Known limitations
+
+Some inputs land llmclean in known false-positive territory. Two worth flagging:
+
+`strip_fences` will remove a single language name if it's the only content inside a fence — so if your model literally emits `` ```\njson\n``` `` as a one-word answer, that content disappears. The aggressive language-tag cleanup catches stray tags from real-world fence variants, and the trade-off is documented in the test `test_lone_language_word_as_content_gets_stripped`.
+
+`enforce_json`'s double-quote collapse only handles the symmetric form `""text""`. The asymmetric variants Sakhi's pipeline also handles (`: ""x` and `x""`) corrupt legitimate empty-string values, so they're deliberately omitted here.
+
+## Tests
 
 ```bash
-# With pytest
 pip install "llmclean[dev]"
 pytest -v
-
-# Without pytest
-python run_tests.py
 ```
 
----
+78 tests across the three modules at v0.2.0. Includes characterization tests for known trade-offs (empty-string preservation, lone-language-tag strip) so future changes can't silently regress them.
 
 ## License
 
-MIT
+MIT.

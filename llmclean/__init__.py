@@ -15,4 +15,4 @@ from .json_utils import enforce_json
 from .repetition import trim_repetition
 
 __all__ = ["strip_fences", "enforce_json", "trim_repetition"]
-__version__ = "0.1.0"
+__version__ = "0.2.0"

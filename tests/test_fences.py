@@ -130,3 +130,142 @@ def test_lone_language_tag_removed():
     # The word 'json' on its own line should not appear
     lines = [l.strip() for l in result.splitlines()]
     assert "json" not in lines
+
+
+# ---------------------------------------------------------------------------
+# Line-ending robustness
+# ---------------------------------------------------------------------------
+# LLM output captured from any Windows client typically has CRLF (\r\n) line
+# endings. Without explicit support, the open/close fence regexes (which use
+# [ \t]*$ as the trailing anchor) don't tolerate a \r before \n, and the
+# function silently strips the WRONG fence — preserving the opener as content
+# and dropping the closer. See _probe_crlf.py for the original diagnosis.
+
+def test_crlf_line_endings_equivalent_to_lf():
+    """A CRLF-fenced block should clean to the same result as an LF-fenced block."""
+    lf   = "```json\n{\"a\":1}\n```"
+    crlf = "```json\r\n{\"a\":1}\r\n```"
+    # Content equality after stripping out \r so the test isn't sensitive to
+    # whether the fix normalizes line endings or preserves them.
+    assert strip_fences(crlf).replace("\r", "") == strip_fences(lf)
+
+
+def test_crlf_mixed_with_lf():
+    """Mixed CRLF (e.g., copy-pasted content) should still strip correctly."""
+    mixed = "```json\n{\"a\":1}\r\n```"
+    result = strip_fences(mixed).replace("\r", "")
+    assert result == '{"a":1}'
+
+
+def test_crlf_unclosed_fence():
+    """Unclosed CRLF fence: drop opener, keep content (matching the LF behavior)."""
+    crlf = "```python\r\nprint('hi')"
+    result = strip_fences(crlf).replace("\r", "")
+    assert "print('hi')" in result
+    assert "```" not in result
+
+
+# ---------------------------------------------------------------------------
+# CommonMark fence-length rules
+# ---------------------------------------------------------------------------
+# Spec: a closing fence must be at least as long as the opening fence.
+#   - open `+`+ `+ → close must be 3+ backticks
+#   - open ````+   → close must be 4+ backticks
+# This lets users embed lower-length fences inside longer ones without
+# accidentally terminating the outer block.
+
+def test_close_longer_than_open_is_valid():
+    """Open=3, close=5 → still a valid close (>= rule). Inner content extracted."""
+    text = "```\ncode\n`````"
+    result = strip_fences(text)
+    assert "code" in result
+    assert "```" not in result
+
+
+def test_close_shorter_than_open_does_not_close():
+    """Open=4, close=3 → 3 backticks must NOT close a 4-backtick fence. The
+    short trailing ``` is treated as content; the actual fence is unclosed."""
+    text = "````\ncode containing ``` inside\n````"
+    result = strip_fences(text)
+    # The genuine close (4 backticks) IS valid; inner content should appear.
+    assert "code containing ``` inside" in result
+    # And the outer 4-backtick fences themselves are gone.
+    assert "````" not in result
+
+
+def test_mixed_fence_types_both_stripped_aggressively():
+    """Backtick open + tilde line — the tilde does NOT close the backtick
+    fence (CommonMark: closer must match opener type). However, on the next
+    pass the tilde is recognized as its own unclosed opener and is also
+    stripped. Net effect: BOTH fence-shaped lines removed, content preserved.
+
+    This is more aggressive than strict CommonMark (which would preserve the
+    tilde line as content of an unclosed block) but matches llmclean's stated
+    mandate: clean ALL fence-shaped artifacts. Characterization test —
+    locks the aggressive interpretation in place."""
+    text = "```python\nprint('hi')\n~~~"
+    result = strip_fences(text)
+    assert "print('hi')" in result
+    assert "```" not in result
+    assert "~~~" not in result
+
+
+# ---------------------------------------------------------------------------
+# Idempotency (a property test)
+# ---------------------------------------------------------------------------
+# strip_fences(strip_fences(x)) == strip_fences(x) — applying the cleaner
+# twice must equal applying it once. This is a structural invariant that any
+# pipeline composing `clean(clean(x))` (e.g., a retry loop, a defensive
+# wrap-and-rewrap) silently depends on. A future "improvement" that breaks
+# this would silently corrupt outputs.
+
+@pytest.mark.parametrize("text", [
+    "no fences here",
+    "```json\n{\"a\":1}\n```",
+    "prose\n```python\nx=1\n```\nmore prose\n```py\ny=2\n```",
+    "```\nfoo\n```\n```\nbar\n```",
+    "unfenced\n~~~\nfoo\n~~~\nmore",
+    "```python\nunclosed",
+    "",
+])
+def test_strip_fences_is_idempotent(text):
+    once = strip_fences(text)
+    twice = strip_fences(once)
+    assert once == twice, (
+        f"Not idempotent.\nonce ={once!r}\ntwice={twice!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Characterizing the known trade-off — the lone-language-tag false positive
+# ---------------------------------------------------------------------------
+# When a user's actual content is just a known language name on its own line
+# (e.g., model answered the question "what language?" with one word inside
+# a code block), _LONE_LANG_TAG_RE strips it. This is a deliberate trade-off
+# (see the comment on _LONE_LANG_TAG_RE) and the test locks the behavior in
+# so a future "fix" that drops the language-tag cleanup doesn't silently
+# regress fence cleanliness on more common inputs.
+
+def test_lone_language_word_as_content_gets_stripped():
+    """Known trade-off: a single-word answer that happens to be a language
+    name will be removed. Documented limitation, not a bug to fix."""
+    text = "```\njson\n```"
+    result = strip_fences(text)
+    # The 'json' content disappears entirely.
+    assert result == ""
+    # If you NEED to preserve such content, don't use strip_fences for it,
+    # OR pre-process to prefix the content with a non-removable token.
+
+
+# ---------------------------------------------------------------------------
+# BOM handling — symmetric with enforce_json
+# ---------------------------------------------------------------------------
+
+def test_bom_before_fence_is_stripped():
+    """A BOM (U+FEFF) right before the opening fence would otherwise break
+    the `^` anchor on _OPEN_FENCE_RE (the line wouldn't start with the
+    fence char). strip_fences handles it up-front."""
+    text = "﻿" + "```json\n{\"a\": 1}\n```"
+    result = strip_fences(text)
+    assert "```" not in result
+    assert '"a"' in result
