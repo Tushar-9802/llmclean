@@ -7,7 +7,7 @@ name = "llmclean"
 version = "0.2.0"
 description = "Utilities for cleaning and normalizing raw LLM output"
 readme = "README.md"
-license = { text = "MIT" }
+license = { file = "LICENSE" }
 requires-python = ">=3.9"
 keywords = ["llm", "cleaning", "json", "text", "ai", "output", "normalization"]
 classifiers = [
