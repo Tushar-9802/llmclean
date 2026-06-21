@@ -206,6 +206,52 @@ def test_single_quoted_keys_and_values():
 
 
 # ---------------------------------------------------------------------------
+# Regression: Python-literal words inside string VALUES must not be rewritten.
+# The old _replace_python_literals did a blind re.sub for True/False/None and
+# silently corrupted these words wherever they appeared, including inside
+# quoted content.  The literal fixer must only touch tokens outside strings.
+# ---------------------------------------------------------------------------
+
+def test_literal_word_inside_string_value_preserved():
+    # A real value literal (True) forces the literal fixer to run; the same
+    # word inside the string value must survive verbatim.
+    text = '{"active": True, "note": "please set active to True"}'
+    result = enforce_json(text)
+    assert _is_valid_json(result)
+    data = json.loads(result)
+    assert data["active"] is True
+    assert data["note"] == "please set active to True"
+
+
+def test_literal_word_as_string_key_preserved():
+    text = '{"None": 1, "True": 2, "x": None}'
+    result = enforce_json(text)
+    assert _is_valid_json(result)
+    data = json.loads(result)
+    assert data == {"None": 1, "True": 2, "x": None}
+
+
+def test_literal_word_inside_single_quoted_value_preserved():
+    text = "{'state': True, 'msg': 'value is None here'}"
+    result = enforce_json(text)
+    assert _is_valid_json(result)
+    data = json.loads(result)
+    assert data["state"] is True
+    assert data["msg"] == "value is None here"
+
+
+def test_escaped_quote_in_value_does_not_break_scan():
+    # An escaped double-quote must not end the string early and expose the
+    # following True to rewriting.
+    text = '{"q": "she said \\"True\\" loudly", "ok": True}'
+    result = enforce_json(text)
+    assert _is_valid_json(result)
+    data = json.loads(result)
+    assert data["q"] == 'she said "True" loudly'
+    assert data["ok"] is True
+
+
+# ---------------------------------------------------------------------------
 # BOM (U+FEFF) handling
 # ---------------------------------------------------------------------------
 # Some LLM client SDKs and any Windows file IO round-trip can prepend a UTF-8

@@ -288,37 +288,6 @@ def _close_open_structures(text: str) -> str:
 # Helpers used by the fixers above
 # ---------------------------------------------------------------------------
 
-def _single_to_double_quotes(text: str) -> str:
-    """Convert single-quoted JSON-ish strings to double-quoted JSON."""
-    result = []
-    i = 0
-    in_single = False
-    in_double = False
-    sq = chr(39)   # '
-    dq = chr(34)   # "
-    bs = chr(92)   # \
-    while i < len(text):
-        ch = text[i]
-        if ch == bs and (in_single or in_double):
-            result.append(ch)
-            i += 1
-            if i < len(text):
-                result.append(text[i])
-                i += 1
-            continue
-        if ch == sq and not in_double:
-            in_single = not in_single
-            result.append(dq)
-        elif ch == dq and not in_single:
-            in_double = not in_double
-            result.append(ch)
-        elif ch == dq and in_single:
-            result.append(bs + dq)
-        else:
-            result.append(ch)
-        i += 1
-    return "".join(result)
-
 def _parse_and_serialize(text: str):
     """Try to parse *text* as JSON; return re-serialized string or None."""
     try:
@@ -329,26 +298,104 @@ def _parse_and_serialize(text: str):
 
 
 # ---------------------------------------------------------------------------
-# Python-literal fixer (added separately for clarity)
+# Python-literal fixer (state-aware, single pass)
 # ---------------------------------------------------------------------------
 
-# Word-boundary replacements for Python boolean/None literals
-_PYTHON_LITERAL_RE = re.compile(r'\bTrue\b|\bFalse\b|\bNone\b')
+# Python boolean/None literals and their JSON equivalents.
 _PYTHON_LITERAL_MAP = {"True": "true", "False": "false", "None": "null"}
 
+
+def _is_word_char(ch: str) -> bool:
+    return ch.isalnum() or ch == "_"
+
+
 def _replace_python_literals(text: str) -> str:
-    """Replace Python True/False/None with JSON true/false/null.
+    """Replace Python ``True``/``False``/``None`` with JSON ``true``/``false``/``null``
+    and convert single-quoted strings to double-quoted — both in one
+    string-state-aware pass.
 
-    Also converts single-quoted strings to double-quoted where safe.
-    Only operates outside of already-valid JSON strings to avoid
-    corrupting content that legitimately contains these words.
+    The earlier implementation did a blind ``re.sub`` for the literals, which
+    silently corrupted the same words when they appeared *inside* a string
+    value (``{"note": "set flag to True"}`` → ``...to true``). A regex cannot
+    tell a bare ``True`` token from the substring ``True`` inside quoted
+    content, so the only correct fix is to track string state and only rewrite
+    literals that sit *outside* any string.
+
+    Rules while scanning:
+      * Inside a double-quoted string: copy verbatim (respecting ``\\`` escapes)
+        until the closing quote — literals here are content, never touched.
+      * Inside a single-quoted string: rewrite the delimiters to ``"``, escape
+        any bare ``"`` that appears in the content, and copy the rest verbatim.
+      * Outside any string: rewrite a ``'`` to ``"`` (string start) and replace
+        a word-boundary-delimited ``True``/``False``/``None`` token.
     """
-    # Step 1: True / False / None  (simple word-boundary swap)
-    result = _PYTHON_LITERAL_RE.sub(lambda m: _PYTHON_LITERAL_MAP[m.group()], text)
+    out = []
+    i = 0
+    n = len(text)
+    in_double = False
+    in_single = False
 
-    # Step 2: single-quoted strings -> double-quoted
-    # Strategy: only replace 'value' patterns that look like JSON string values
-    # or keys (preceded by { , or : and optional whitespace).
-    # This is intentionally conservative to avoid mangling prose.
-    result = _single_to_double_quotes(result)
-    return result
+    while i < n:
+        ch = text[i]
+
+        if in_double:
+            # Copy verbatim; honour backslash escapes so an escaped quote
+            # does not prematurely end the string.
+            if ch == "\\" and i + 1 < n:
+                out.append(ch)
+                out.append(text[i + 1])
+                i += 2
+                continue
+            out.append(ch)
+            if ch == '"':
+                in_double = False
+            i += 1
+            continue
+
+        if in_single:
+            if ch == "\\" and i + 1 < n:
+                out.append(ch)
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if ch == "'":
+                out.append('"')          # closing single quote -> double
+                in_single = False
+                i += 1
+                continue
+            if ch == '"':
+                out.append('\\"')        # bare double inside content -> escape
+                i += 1
+                continue
+            out.append(ch)
+            i += 1
+            continue
+
+        # --- outside any string ---
+        if ch == '"':
+            in_double = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "'":
+            in_single = True
+            out.append('"')              # opening single quote -> double
+            i += 1
+            continue
+
+        # Try to match a Python literal token at this position.
+        for word, repl in _PYTHON_LITERAL_MAP.items():
+            if not text.startswith(word, i):
+                continue
+            before_ok = i == 0 or not _is_word_char(text[i - 1])
+            end = i + len(word)
+            after_ok = end >= n or not _is_word_char(text[end])
+            if before_ok and after_ok:
+                out.append(repl)
+                i = end
+                break
+        else:
+            out.append(ch)
+            i += 1
+
+    return "".join(out)
