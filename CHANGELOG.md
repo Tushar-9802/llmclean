@@ -1,5 +1,78 @@
 # Changelog
 
+## 0.3.0 — unreleased
+
+Five new public functions and a correctness fix, grounded in an empirical sweep
+of five local models (llama3.1 / gemma4 / qwen2.5 / deepseek-r1 / mistral, all
+7–8B instruct) plus a survey of where the ecosystem already re-implements these
+by hand.
+
+### `enforce_json` — Python-literal fix no longer corrupts string content
+
+`_replace_python_literals` did a blind `re.sub` of `True` / `False` / `None`,
+despite its docstring claiming it only operated outside strings. It rewrote
+those words everywhere — including inside string *values* (`{"note": "set to
+True"}` → `…to true`) and string *keys* (`{"None": 1}` → `{null: 1}`). A regex
+can't tell a bare literal token from the same letters inside quoted content, so
+the fix is a single state-aware pass that tracks double/single-string context
+(with escape handling) and rewrites literals and quote delimiters only outside
+strings. Removed the now-dead `_single_to_double_quotes` helper and
+`_PYTHON_LITERAL_RE`.
+
+### `strip_reasoning_trace`, `strip_preamble` (new module `prose.py`)
+
+`strip_reasoning_trace` removes `<think>…</think>` chain-of-thought blocks
+(tags: think/thinking/thought/scratchpad/reflection/reasoning/rationale),
+including the DeepSeek-R1 shape where the opener lived in the chat template and
+only a trailing `</think>` is returned. `strip_preamble` removes curated
+conversational filler — "Sure!", "Here is the …:", "Hope that helps!".
+
+Scope finding worth recording: current Ollama (0.30.10) splits reasoning into a
+separate `thinking`/`reasoning` field on both `/api/generate` and `/v1`, so its
+native consumers never see the tags inline. `strip_reasoning_trace` is for the
+backends that *do* inline them — llama.cpp direct, vLLM without
+`--reasoning-parser`, TGI/SGLang, LM Studio, raw `transformers`, and most
+aggregators. Validated against a real deepseek-r1 trace re-wrapped in that
+inline wire format.
+
+### `strip_invisibles`, `normalize_typography` (new module `unicode_norm.py`)
+
+`strip_invisibles` removes zero-width spaces, word joiners, BOM, soft hyphens,
+bidi marks/isolates, invisible math operators, and C0/C1 controls — keeping
+tab/newline/CR, and preserving zero-width joiners that bind emoji sequences
+(👨‍👩‍👧). `normalize_typography` maps smart quotes, em/en dashes, the ellipsis
+character, non-breaking and exotic spaces, and ligatures to ASCII, with
+per-category flags (a `fullwidth` category is opt-in, off by default).
+
+Honest scope: across 40 generations the five local models emitted ASCII
+punctuation *exclusively* — zero smart quotes, ellipsis chars, NBSP, ligatures,
+or zero-width characters, even when explicitly prompted for them. This mess is a
+frontier cloud-model trait (the em-dash complaints that made OpenAI ship a
+toggle), so these two functions serve pasted/piped ChatGPT/Claude/Gemini output
+and are tested against synthetic fixtures of that shape rather than local
+output. Fullwidth punctuation *did* appear locally — but only in CJK prose,
+never in JSON structure — which is why it is a normalize_typography category and
+not a JSON-repair strategy.
+
+### `strip_markdown` (new module `markdown.py`)
+
+Flattens markdown to plain prose for the TTS / voice-bot / plain-field use case:
+headers, bold/italic/strikethrough, inline code, links and images, blockquotes,
+ordered/unordered lists, horizontal rules, and basic pipe tables; reuses
+`strip_fences` for code blocks. Best-effort and conservative — `snake_case`
+identifiers and `a-b` ranges survive because list/emphasis rules require markup
+at a line start or span boundary. Markdown was the most common output trait in
+the local baseline (every "explain with headers", code, and table prompt), so
+this is validated against a real gemma4 capture.
+
+### Tests
+
+Suite grew from 78 to 138. The empirical harness lives in `dev/`
+(`probe_models.py`, `probe_generative.py`) and writes gitignored JSONL captures;
+the real-output fixtures in the prose/markdown tests come from those runs.
+
+---
+
 ## 0.2.0 — 2026-05-11
 
 ### `strip_fences`

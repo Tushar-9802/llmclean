@@ -33,3 +33,7 @@ desktop.ini
 
 # Scratch
 .commit_msg
+
+# Dev probe harness output (model-output captures, regenerable)
+dev/probe_results.jsonl
+dev/probe_generative.jsonl
