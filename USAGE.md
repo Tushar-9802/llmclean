@@ -10,7 +10,45 @@ python3
 >>> from llmclean import strip_invisibles, normalize_typography, strip_markdown
 ```
 
-**The eight functions by job:**
+---
+
+## Start here: the three front doors
+
+Most callers never need anything below this section.
+
+```python
+import llmclean
+
+# 1. I asked for JSON — give me a dict
+llmclean.load_json('Sure!\n```json\n{"ok": True, "n": [1,2,3,]}\n```')
+# → {'ok': True, 'n': [1, 2, 3]}
+llmclean.load_json('no json here')          # → None
+llmclean.load_json('nope', default={})      # → {}
+
+# 2. I asked for prose — give me clean text
+llmclean.clean_text('<think>hmm</think>Sure! Here is the answer:\n\n# Title\n\n- **bold** point')
+# → 'Title\n\nbold point'
+
+# 3. Is this output broken?
+llmclean.check('We tune the parameter parameter parameter values today.')
+# → {'degenerate': True, 'rules_fired': ['top_token_frac', 'adjacent_dup_rate'], ...}
+```
+
+`load_json` strips reasoning traces first (so braces inside a `<think>` block can't hijack extraction), then runs the full `enforce_json` repair pipeline and parses. Returns `default` instead of raising.
+
+`clean_text` runs: reasoning trace → conversational filler → markdown → invisible characters → typography. Each stage is a keyword flag:
+
+```python
+llmclean.clean_text(raw, markdown=False)       # keep the markdown
+llmclean.clean_text(raw, typography=False)     # keep smart quotes / em dashes
+llmclean.clean_text(raw, repetition=True)      # also trim repeated tails (off by default)
+```
+
+`repetition` is off by default on purpose: silently trimming it would hide model damage, which is exactly what `check` exists to surface.
+
+---
+
+**The lower-level functions by job:**
 
 | Function | Cleans up |
 |---|---|
@@ -22,6 +60,9 @@ python3
 | `strip_invisibles` | zero-width & control characters |
 | `normalize_typography` | smart quotes / em dashes / ellipsis → ASCII |
 | `strip_markdown` | markdown formatting → plain prose |
+| `degeneracy_score` | reports token/subword/phrase loops (does not modify) |
+| `collapse_word_runs` | runs of 3+ identical adjacent words |
+| `collapse_intra_word_runs` | repeated substrings inside a word (opt-in, lossy) |
 
 ---
 
@@ -417,6 +458,54 @@ strip_markdown("| A | B |\n|---|---|\n| 1 | 2 |")
 # 6. Wrong type — does not crash
 strip_markdown(None)   # → None
 ```
+
+---
+
+## `degeneracy_score(text, cap_tokens=None)` and friends
+
+Repetition happens at three levels, and `trim_repetition` only covers one:
+
+| level | example | covered by |
+|---|---|---|
+| phrase (clause loops) | `"So this is 8 infinity. So this is 8 infinity."` | `trim_repetition` |
+| token (adjacent words) | `"parameter parameter parameter"` | `collapse_word_runs` |
+| subword (inside a word) | `"thresholdinginginging"` | `collapse_intra_word_runs` |
+
+`degeneracy_score` reports all three plus vocabulary collapse, without modifying anything.
+
+```python
+from llmclean import degeneracy_score, collapse_word_runs, collapse_intra_word_runs
+
+degeneracy_score("The encoder maps input tokens to dense vectors downstream.")
+# → {'degenerate': False, 'rules_fired': [], ...}
+
+degeneracy_score("We tune the parameter parameter parameter values today.")
+# → {'degenerate': True, 'rules_fired': ['adjacent_dup_rate'], ...}
+
+# The subword case is invisible to every word-level metric — one unique word
+degeneracy_score("thresholdinginginging")
+# → distinct_ratio 1.0, adjacent_dup_rate 0.0, but rules_fired ['intra_word_rate']
+
+# Repair (only when you cannot regenerate)
+collapse_word_runs("the parameter parameter parameter values")   # → 'the parameter values'
+collapse_word_runs("the things that that he had had before")     # → unchanged (doubles are real English)
+collapse_intra_word_runs("thresholdinginginging")                # → 'thresholding'
+```
+
+Returned keys: `degenerate`, `rules_fired`, `short_text`, `word_count`, `distinct_ratio`, `top_token_frac`, `adjacent_dup_rate`, `intra_word_rate`, `phrase_repetition`, `truncated`, `mixed_script_words`.
+
+`truncated` and `mixed_script_words` are reported but excluded from the `degenerate` verdict — separate failure axes with separate fixes. Truncation is a token-budget/EOS problem, not a repetition problem; prefer your provider's `finish_reason` when you have it.
+
+Thresholds are calibrated on English prose of roughly 100–250 words. On shorter text one repeated token swings the rates, so `short_text` is set below 30 words — treat a flag there as weak evidence.
+
+### Decode-side context worth knowing
+
+If you're reaching for `trim_repetition`, you may be fighting this one layer too late:
+
+- Anti-repetition decode settings **mask** loops rather than fix them. Cleaned text looks better while the model stays broken, so log `degeneracy_score` even when cleaning succeeds.
+- Run length depends on the mechanism, so don't tune for a specific length. A hard trigram ban (`no_repeat_ngram_size=3`) truncates unbounded loops into exactly-three runs. A soft logit penalty (llama.cpp/Ollama `repeat_penalty`) gives you either no runs at all or fully unbounded ones — measured here as a 61-word run from gemma4 at `repeat_penalty=1.0`.
+- `repetition_penalty` is not free: at 1.15 it suppressed loops but visibly degraded content quality by over-penalizing legitimate reuse of topic words. Gentle values (≤1.05) plus detection is the safer combination.
+- If a large fraction of outputs trip the detector, the model or its fine-tune is the problem. In the study behind these rules the cause was a mis-designed auxiliary training loss, and no amount of output cleaning was the right fix.
 
 ---
 

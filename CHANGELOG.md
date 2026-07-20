@@ -1,6 +1,84 @@
 # Changelog
 
-## 0.3.0 — unreleased
+## 0.4.0 — unreleased
+
+Degeneration detection, from a study of 24 fine-tuned model variants (~600 generations per eval) plus controlled decode probes. Also a front door, because the library had grown to fifteen functions with no obvious place to start.
+
+### Fixed: truncation detection flagged all non-Latin output
+
+`looks_truncated` checked the final character against a Latin-only terminator set, so any language that does not end sentences with `.`/`!`/`?` was reported as cut off mid-thought. Measured on a multilingual corpus: **100% of Hindi output** (which ends with the danda `।`) and **100% of Chinese output** (ideographic full stop `。`) were falsely flagged.
+
+The terminator set now covers Devanagari (`।` `॥`), CJK (`。` `！` `？` `．` and closing quotes/brackets), Urdu/Arabic (`۔` `؟`), Khmer, and Ethiopic. A closing code fence is also treated as a structural end rather than a truncation.
+
+Effect on a 269-text corpus: false truncation flags fell from 66% to 27% of non-capped generations, while deliberately token-capped generations stayed at 85% — the remaining flags are genuine (output ending mid-word, or mid-fence with `` `` `` instead of ```` ``` ````). Chinese went from 12/12 flagged to 0/12.
+
+Found by replaying a generated production corpus rather than by unit tests, which is the point of the harness below.
+
+### Validation: a production-shaped corpus
+
+`dev/simulate_production.py` generates output from five local models across fifteen task types (flat/nested/array JSON, JSON from long context, chat, summarization, markdown, code, classification, Hindi, Chinese, Hinglish code-switching, user-JSON echo, tables) and four decode conditions including a 24-token cap that forces real truncation. Each generation is then replayed through eight transport mutations that model what happens between a model and a parser: CRLF from Windows clients, BOM from gateways, mid-stream cutoff, HTML escaping, UTF-8-decoded-as-latin-1 mojibake, duplicated stream-chunk boundaries, trailing whitespace.
+
+300 generations, 269 non-empty texts, 8 mutations, 14 functions: **30,128 calls, zero escaped exceptions, zero internal warnings.** JSON extraction tasks parsed to a dict 90% of the time under normal decode conditions (100% for llama3.1, mistral, and qwen2.5) and 25% under the 24-token cap, which is the correct outcome — JSON cut off at 24 tokens is not recoverable.
+
+### New: the never-raise guarantee stopped hiding bugs
+
+Thirteen defensive `except Exception` blocks kept the never-raise contract by returning the input unchanged — and swallowed every internal error with no trace. An injected bug in `strip_markdown` returned `'# Title'` and printed nothing, even with `logging.basicConfig(level=DEBUG)`. That is the same failure the library's own `degeneracy.py` warns about: a cleaner that silently tidies the overflow hides the damage.
+
+Every fallback now logs to a `logging.getLogger("llmclean")` with a `NullHandler` — silent unless the application configures logging. Unexpected exceptions log at `WARNING` with `exc_info`; expected misses (no JSON in the text) log at `DEBUG`. `enable_debug_logging()` is an opt-in one-liner for a quick look. The log helpers swallow their own errors, so a misconfigured handler cannot become the thing that raises.
+
+Validated across 784 calls — 86 real outputs from llama3.1/gemma4/qwen2.5/deepseek-r1/mistral plus 12 hostile inputs (empty, null bytes, 20k-word strings, 300-deep nesting, lone surrogates, RTL overrides, emoji ZWJ sequences) — with zero escaped exceptions and zero internal warnings.
+
+### New: three front doors
+
+```python
+data   = llmclean.load_json(raw)    # → dict/list, or None
+text   = llmclean.clean_text(raw)   # → clean plain prose
+report = llmclean.check(raw)        # → degeneration report
+```
+
+The common case was four lines and a `try/except`: `enforce_json` returns a *string*, so every caller then had to `json.loads` it themselves and handle the failure. `load_json` does the whole thing and returns the parsed object or your `default`. It strips reasoning traces before extraction, so braces inside a `<think>` block can't hijack the result.
+
+`clean_text` composes reasoning-trace → preamble → markdown → invisibles → typography, each toggleable. Repetition trimming is off by default: doing it silently would hide the model damage `check` exists to surface.
+
+The dozen single-purpose functions are unchanged and remain exported for callers who want to control the pipeline.
+
+### The gap this closes
+
+Repetition happens at three levels and `trim_repetition` only covered one. Verified against v0.3.0:
+
+| level | example | v0.3.0 |
+|---|---|---|
+| phrase | `"So this is 8 infinity. So this is 8 infinity."` | handled |
+| token | `"parameter parameter parameter"` | **missed** |
+| subword | `"thresholdinginginging"` | **missed** |
+
+The n-gram strategy's smallest visible unit is a 5-word phrase occurring 3 times, so a 1-word phrase occurring 3 times is invisible. Token and subword loops are also scattered through the text rather than tail-concentrated, so a tail-trimmer cannot reach them regardless.
+
+### New: `degeneracy_score` (detection as a first-class API)
+
+Reports without modifying. `degenerate` is the OR of five calibrated rules — `distinct_ratio`, `top_token_frac`, `adjacent_dup_rate`, `intra_word_rate`, and `phrase_repetition` (which reuses `trim_repetition`). The rules overlap but none is redundant: the subword sample passes all four word-level rules because it is a single unique word; total collapse passes the subword rule; phrase loops pass all four word-level rules because their words alternate.
+
+`truncated` and `mixed_script_words` are reported but excluded from the verdict — separate axes with separate fixes. Truncation is a token-budget problem; conflating it with repetition buries a real signal (in the source study a healthy model was 9% truncated and a damaged one 41%).
+
+Thresholds: 0 false positives across ~675 clean texts, 15/15 true positives on known-bad masked output. `short_text` flags input under 30 words where the rates get noisy.
+
+### New: repair functions
+
+`collapse_word_runs` collapses runs of 3+ identical adjacent words; runs of 2 are left alone because they occur in real English ("had had", "that that"). `collapse_intra_word_runs` is opt-in and lossy — it iterates to a fixpoint since one pass leaves residue, and it will also collapse genuine reduplication ("couscous"). A tripped `intra_word_rate` usually means the generation should be retried, not repaired.
+
+Also `adjacent_dup_rate`, `intra_word_rate`, `looks_truncated`, and `mixed_script_words` as individual signals. Word-internal script mixing catches intrusions like `"ReLУ"` (Cyrillic У in a Latin word); it never inspects beyond a single word, because document-level script mixing is legitimate in Hinglish and any bilingual text.
+
+### Decode-probe finding: run length is mechanism-dependent
+
+The source study measured HF's `no_repeat_ngram_size`, a hard trigram ban, which truncates an unbounded `X X X X…` loop at exactly the fourth `X` — so masked traffic shows exactly-three runs and never longer.
+
+llama.cpp/Ollama use `repeat_penalty`, a soft logit penalty, and it does not behave that way. Across 50 generations (5 models × 2 conditions × 5 loop-inviting prompts, greedy decode): with the penalty at its default the longest adjacent run was 1, and with it disabled gemma4 produced a **61-word** run (`"superb, superb, superb…"` to the token budget) rather than anything truncated to 3. Detection therefore collapses at >=3 and does not tune for a specific run length.
+
+Two more things that sweep showed: disabling the penalty roughly doubled the degeneration rate (3/25 → 6/25), and across all 50 generations from stock instruct models, phrase-level repetition dominated, token loops appeared once, and subword loops never appeared at all. The token and subword modes are fine-tune damage signatures, not stock-model behaviour — which is consistent with the source study, where they came from a mis-designed auxiliary training loss.
+
+---
+
+## 0.3.0 — 2026-06-21
 
 Five new public functions and a correctness fix, grounded in an empirical sweep
 of five local models (llama3.1 / gemma4 / qwen2.5 / deepseek-r1 / mistral, all
