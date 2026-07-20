@@ -21,6 +21,7 @@ text and requires repetition to be clearly back-to-back or densely clustered.
 
 import re
 from typing import Optional
+from ._log import log_failure
 
 # ---------------------------------------------------------------------------
 # Tunables (all have sensible defaults)
@@ -73,7 +74,8 @@ def trim_repetition(text: str, *, similarity_threshold: float = _JACCARD_THRESHO
     try:
         result = _trim(text, similarity_threshold)
         return result if result.strip() else original
-    except Exception:
+    except Exception as _e:
+        log_failure("trim_repetition", _e)
         return original
 
 

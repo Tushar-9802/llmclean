@@ -22,6 +22,7 @@ caller can decide what to do.
 import json
 import re
 from .fences import strip_fences
+from ._log import log_failure
 
 
 # Byte Order Mark — U+FEFF. Some LLM client SDKs and any pipeline that
@@ -61,7 +62,8 @@ def enforce_json(text: str) -> str:
 
     try:
         return _run_pipeline(text.lstrip(_BOM).strip())
-    except Exception:
+    except Exception as _e:
+        log_failure("enforce_json", _e)
         return original
 
 

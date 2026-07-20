@@ -24,6 +24,7 @@ want is itself free text.
 """
 
 import re
+from ._log import log_failure
 
 # ---------------------------------------------------------------------------
 # Reasoning traces
@@ -99,7 +100,8 @@ def strip_reasoning_trace(text: str) -> str:
                 and "</" not in original:
             return original
         return cleaned
-    except Exception:
+    except Exception as _e:
+        log_failure("strip_reasoning_trace", _e)
         return original
 
 
@@ -189,5 +191,6 @@ def strip_preamble(text: str, postamble: bool = True) -> str:
         # Never strip the entire message away — if filler was all there was,
         # the caller is better served by the original than by an empty string.
         return cleaned if cleaned else original
-    except Exception:
+    except Exception as _e:
+        log_failure("strip_preamble", _e)
         return original

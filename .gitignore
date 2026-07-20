@@ -37,3 +37,11 @@ desktop.ini
 # Dev probe harness output (model-output captures, regenerable)
 dev/probe_results.jsonl
 dev/probe_generative.jsonl
+dev/probe_degeneration.jsonl
+dev/production_corpus.jsonl
+
+# Lockfile: this is a zero-dep library, not an application
+uv.lock
+
+# Local research notes (cites internal project structure)
+dev/degeneration-research.md

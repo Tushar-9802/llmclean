@@ -20,6 +20,7 @@ highest-frequency non-fence cleanup need.
 import re
 
 from .fences import strip_fences
+from ._log import log_failure
 
 # Code fences are handled by strip_fences (keeps inner code). Everything below
 # operates line- or span-wise on the de-fenced text.
@@ -133,5 +134,6 @@ def strip_markdown(text: str) -> str:
         text = _MULTI_BLANK_RE.sub("\n\n", text)
         text = "\n".join(ln.rstrip() for ln in text.split("\n"))
         return text.strip()
-    except Exception:
+    except Exception as _e:
+        log_failure("strip_markdown", _e)
         return original

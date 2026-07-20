@@ -18,6 +18,7 @@ This module handles:
 """
 
 import re
+from ._log import log_failure
 
 # ---------------------------------------------------------------------------
 # Patterns
@@ -94,7 +95,8 @@ def strip_fences(text: str) -> str:
         # Collapse any excessive blank lines introduced by fence removal
         result = _normalize_blank_lines(result)
         return result
-    except Exception:
+    except Exception as _e:
+        log_failure("strip_fences", _e)
         # Safety net: never crash the caller
         return original
 

@@ -23,6 +23,7 @@ normalization is its own opt-in category rather than on by default.
 """
 
 import re
+from ._log import log_failure
 
 # ---------------------------------------------------------------------------
 # strip_invisibles
@@ -86,7 +87,8 @@ def strip_invisibles(text: str) -> str:
         # Context-sensitive ZWJ handling first (translate can't see neighbours).
         text = _ZWJ_REMOVE_RE.sub("", text)
         return text.translate(_INVISIBLE_TRANSLATE)
-    except Exception:
+    except Exception as _e:
+        log_failure("strip_invisibles", _e)
         return text
 
 
@@ -183,5 +185,6 @@ def normalize_typography(
         if not table:
             return text
         return text.translate(table)
-    except Exception:
+    except Exception as _e:
+        log_failure("normalize_typography", _e)
         return text
